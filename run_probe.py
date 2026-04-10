@@ -17,6 +17,7 @@ from experiment_config import (
     DEFAULT_VARIANTS_DIR,
     make_conversation,
 )
+from hf_auth import configure_hf_token
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_examples", type=int, default=None)
     parser.add_argument("--save_full_router_probs", action="store_true")
     parser.add_argument("--prompt_text", type=str, default=DEFAULT_PROMPT)
+    parser.add_argument(
+        "--hf_token_secret_name",
+        type=str,
+        default="HF_TOKEN",
+        help="Colab secret name to check if HF_TOKEN is not already present in the environment.",
+    )
     return parser.parse_args()
 
 
@@ -125,12 +132,19 @@ def safe_name(text: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in text)
 
 
-def build_processor(model_id: str, min_pixels: int | None, max_pixels: int | None) -> AutoProcessor:
+def build_processor(
+    model_id: str,
+    min_pixels: int | None,
+    max_pixels: int | None,
+    token: str | None,
+) -> AutoProcessor:
     kwargs = {}
     if min_pixels is not None:
         kwargs["min_pixels"] = min_pixels
     if max_pixels is not None:
         kwargs["max_pixels"] = max_pixels
+    if token:
+        kwargs["token"] = token
     return AutoProcessor.from_pretrained(model_id, **kwargs)
 
 
@@ -171,6 +185,7 @@ def extract_answer_features(
 
 def main() -> None:
     args = parse_args()
+    token = configure_hf_token(secret_name=args.hf_token_secret_name)
     if not args.manifest_csv.exists():
         raise FileNotFoundError(
             f"Manifest file {args.manifest_csv} does not exist. "
@@ -184,11 +199,12 @@ def main() -> None:
     if args.max_examples is not None:
         rows = rows[: args.max_examples]
 
-    processor = build_processor(args.model_id, min_pixels=args.min_pixels, max_pixels=args.max_pixels)
+    processor = build_processor(args.model_id, min_pixels=args.min_pixels, max_pixels=args.max_pixels, token=token)
     model = Qwen3OmniMoeThinkerForConditionalGeneration.from_pretrained(
         args.model_id,
         dtype=choose_dtype(args.torch_dtype),
         device_map=args.device_map,
+        token=token,
     )
     model.eval()
     device = next(model.parameters()).device

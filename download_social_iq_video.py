@@ -14,6 +14,7 @@ from experiment_config import (
     SOCIAL_IQ_DATASET_REPO_ID,
     SOCIAL_IQ_DEFAULT_SPLIT,
 )
+from hf_auth import configure_hf_token
 
 
 QA_FILENAME_BY_SPLIT = {
@@ -28,6 +29,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo_id", type=str, default=SOCIAL_IQ_DATASET_REPO_ID)
     parser.add_argument("--split", choices=sorted(QA_FILENAME_BY_SPLIT), default=SOCIAL_IQ_DEFAULT_SPLIT)
     parser.add_argument("--output_dir", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument(
+        "--hf_token_secret_name",
+        type=str,
+        default="HF_TOKEN",
+        help="Colab secret name to check if HF_TOKEN is not already present in the environment.",
+    )
     parser.add_argument("--max_videos", type=int, default=12, help="Number of unique validation videos to download.")
     parser.add_argument(
         "--selection",
@@ -87,10 +94,10 @@ def ordered_unique_video_ids(rows: list[dict]) -> list[str]:
     return ordered_ids
 
 
-def available_video_ids(repo_id: str) -> set[str]:
+def available_video_ids(repo_id: str, token: str | None = None) -> set[str]:
     from huggingface_hub import list_repo_files
 
-    repo_files = list_repo_files(repo_id=repo_id, repo_type="dataset")
+    repo_files = list_repo_files(repo_id=repo_id, repo_type="dataset", token=token)
     available_ids = set()
     for file_path in repo_files:
         if not file_path.startswith("video/"):
@@ -136,6 +143,8 @@ def main() -> None:
     args = parse_args()
     from huggingface_hub import hf_hub_download
 
+    token = configure_hf_token(secret_name=args.hf_token_secret_name)
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     raw_clips_dir = args.output_dir / DEFAULT_RAW_CLIPS_DIR.name
     metadata_dir = args.output_dir / DEFAULT_METADATA_DIR.name
@@ -143,10 +152,10 @@ def main() -> None:
     metadata_dir.mkdir(parents=True, exist_ok=True)
 
     qa_filename = QA_FILENAME_BY_SPLIT[args.split]
-    qa_cache_path = hf_hub_download(repo_id=args.repo_id, repo_type="dataset", filename=qa_filename)
+    qa_cache_path = hf_hub_download(repo_id=args.repo_id, repo_type="dataset", filename=qa_filename, token=token)
     qa_rows = load_qa_rows(Path(qa_cache_path))
     qa_video_ids = ordered_unique_video_ids(qa_rows)
-    repo_video_ids = available_video_ids(args.repo_id)
+    repo_video_ids = available_video_ids(args.repo_id, token=token)
     all_video_ids = [video_id for video_id in qa_video_ids if video_id in repo_video_ids]
     missing_video_ids = sorted(set(qa_video_ids) - repo_video_ids)
 
@@ -164,7 +173,12 @@ def main() -> None:
     )
 
     for vid_name in selected_video_ids:
-        cached_video = hf_hub_download(repo_id=args.repo_id, repo_type="dataset", filename=f"video/{vid_name}.mp4")
+        cached_video = hf_hub_download(
+            repo_id=args.repo_id,
+            repo_type="dataset",
+            filename=f"video/{vid_name}.mp4",
+            token=token,
+        )
         dst_video = raw_clips_dir / f"{vid_name}.mp4"
         if dst_video.exists() and not args.overwrite:
             continue

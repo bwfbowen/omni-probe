@@ -78,6 +78,16 @@ If the runtime does not already have `ffmpeg`:
 apt-get update && apt-get install -y ffmpeg
 ```
 
+If you stored a Hugging Face token as a Colab secret named `HF_TOKEN`, the scripts now pick it up automatically. If you want to set it manually in the notebook, use:
+
+```python
+from google.colab import userdata
+import os
+
+os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+os.environ["HUGGINGFACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
+```
+
 ### 2. Download a Small `Social-IQ-Video` Validation Subset
 
 The default workflow uses the `Social-IQ-Video` validation split and downloads a small set of unique videos.
