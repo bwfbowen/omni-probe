@@ -87,6 +87,20 @@ def ordered_unique_video_ids(rows: list[dict]) -> list[str]:
     return ordered_ids
 
 
+def available_video_ids(repo_id: str) -> set[str]:
+    from huggingface_hub import list_repo_files
+
+    repo_files = list_repo_files(repo_id=repo_id, repo_type="dataset")
+    available_ids = set()
+    for file_path in repo_files:
+        if not file_path.startswith("video/"):
+            continue
+        if not file_path.endswith(".mp4"):
+            continue
+        available_ids.add(Path(file_path).stem)
+    return available_ids
+
+
 def choose_video_ids(all_ids: list[str], max_videos: int, selection: str, seed: int) -> list[str]:
     if max_videos <= 0:
         raise ValueError("--max_videos must be positive")
@@ -131,7 +145,17 @@ def main() -> None:
     qa_filename = QA_FILENAME_BY_SPLIT[args.split]
     qa_cache_path = hf_hub_download(repo_id=args.repo_id, repo_type="dataset", filename=qa_filename)
     qa_rows = load_qa_rows(Path(qa_cache_path))
-    all_video_ids = ordered_unique_video_ids(qa_rows)
+    qa_video_ids = ordered_unique_video_ids(qa_rows)
+    repo_video_ids = available_video_ids(args.repo_id)
+    all_video_ids = [video_id for video_id in qa_video_ids if video_id in repo_video_ids]
+    missing_video_ids = sorted(set(qa_video_ids) - repo_video_ids)
+
+    if not all_video_ids:
+        raise ValueError(
+            f"No downloadable video IDs were found for split={args.split} in repo {args.repo_id}. "
+            "The QA metadata and video tree appear to be out of sync."
+        )
+
     selected_video_ids = choose_video_ids(
         all_ids=all_video_ids,
         max_videos=args.max_videos,
@@ -152,6 +176,13 @@ def main() -> None:
         metadata_dir=metadata_dir,
         split=args.split,
     )
+    if missing_video_ids:
+        missing_path = metadata_dir / f"social_iq_{args.split}_missing_video_ids.txt"
+        missing_path.write_text("\n".join(missing_video_ids) + "\n")
+        print(
+            f"Skipped {len(missing_video_ids)} QA video IDs with no matching video/*.mp4 entry in the dataset repo. "
+            f"Wrote the list to {missing_path}"
+        )
 
     print(f"Downloaded {len(selected_video_ids)} Social-IQ-Video clips to {raw_clips_dir}")
     print(f"Saved QA metadata to {metadata_dir}")

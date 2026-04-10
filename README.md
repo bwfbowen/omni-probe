@@ -95,6 +95,8 @@ This writes:
 - `data/social_iq_video/metadata/social_iq_validation_questions.json`
 - `data/social_iq_video/metadata/social_iq_validation_questions.csv`
 
+The downloader now intersects the QA `vid_name` values with the actual `video/*.mp4` files present in the Hugging Face mirror, so it will skip broken QA-to-video references instead of crashing on a 404. When such mismatches exist, it writes a `social_iq_<split>_missing_video_ids.txt` file in the metadata directory.
+
 The `Social-IQ-Video` mirror is a copy of the Social-IQ 2.0 challenge data. The Hugging Face dataset page currently shows `987` unique videos and about `8.82k` QA rows across train, validation, and test. Sources:
 
 - [Social-IQ-Video HF mirror](https://huggingface.co/datasets/PediaMedAI/Social-IQ-Video)
