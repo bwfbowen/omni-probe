@@ -41,7 +41,30 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_qa_rows(path: Path) -> list[dict]:
-    payload = json.loads(path.read_text())
+    text = path.read_text()
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        rows = []
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                row = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Failed to parse {path} as JSON or JSONL. "
+                    f"First invalid JSONL record is on line {line_number}."
+                ) from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"Expected JSON object per line in {path}, got {type(row).__name__} on line {line_number}")
+            rows.append(row)
+        if rows:
+            return rows
+        raise ValueError(f"{path} is empty or not valid JSON/JSONL")
+
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
