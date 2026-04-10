@@ -186,21 +186,51 @@ def build_processor(
     return AutoProcessor.from_pretrained(model_id, **kwargs)
 
 
+class RouterCapture:
+    def __init__(self, model: torch.nn.Module):
+        self._ordered_gate_names: list[str] = []
+        self._captured: dict[str, torch.Tensor] = {}
+        self._handles = []
+        for name, module in model.named_modules():
+            if name.startswith("model.layers.") and name.endswith(".mlp.gate"):
+                self._ordered_gate_names.append(name)
+                self._handles.append(module.register_forward_hook(self._make_hook(name)))
+
+    def _make_hook(self, name: str):
+        def hook(_module: torch.nn.Module, _inputs: tuple[Any, ...], output: Any) -> None:
+            if not isinstance(output, tuple) or len(output) == 0:
+                raise RuntimeError(f"Unexpected router hook output for {name}: {type(output).__name__}")
+            self._captured[name] = output[0].detach()
+
+        return hook
+
+    def clear(self) -> None:
+        self._captured.clear()
+
+    def get_router_logits(self) -> tuple[torch.Tensor, ...]:
+        router_logits = tuple(self._captured[name] for name in self._ordered_gate_names if name in self._captured)
+        if not router_logits:
+            raise RuntimeError(
+                "Failed to capture any router logits from model.layers.*.mlp.gate hooks. "
+                "This likely means the installed model architecture differs from the expected thinker MoE layout."
+            )
+        return router_logits
+
+    def close(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+
+
 def extract_answer_features(
-    outputs: Any,
+    router_logits: tuple[torch.Tensor, ...],
     prompt_len: int,
     answer_len: int,
     batch_size: int,
     seq_len: int,
 ) -> dict[str, Any]:
-    if outputs.router_logits is None:
-        raise RuntimeError(
-            "router_logits is missing from model outputs. "
-            "Make sure the installed Transformers version supports output capture for Qwen3-Omni."
-        )
-
     answer_positions = list(range(prompt_len, prompt_len + answer_len))
-    normalized_layers = normalize_router_tuple(outputs.router_logits, batch_size=batch_size, sequence_length=seq_len)
+    normalized_layers = normalize_router_tuple(router_logits, batch_size=batch_size, sequence_length=seq_len)
 
     layer_prob_means = []
     layer_entropy_means = []
@@ -247,6 +277,7 @@ def main() -> None:
     model.eval()
     device = next(model.parameters()).device
     model_dtype = next(model.parameters()).dtype
+    router_capture = RouterCapture(model)
 
     tokenizer = processor.tokenizer
     answer_id_map = {
@@ -258,89 +289,93 @@ def main() -> None:
     sampling_rate = int(processor.feature_extractor.sampling_rate)
 
     with torch.no_grad():
-        for row in rows:
-            clip_id = row["clip_id"]
-            variant = row["variant"]
-            video_path = row["video_path"]
+        try:
+            for row in rows:
+                clip_id = row["clip_id"]
+                variant = row["variant"]
+                video_path = row["video_path"]
 
-            conversation = make_conversation(video_path, args.prompt_text)
-            prompt_text = processor.apply_chat_template(
-                conversation,
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            audio_array = extract_audio_from_video(video_path, sample_rate=sampling_rate)
-            inputs = processor(
-                text=prompt_text,
-                videos=[[video_path]],
-                audio=[audio_array],
-                return_tensors="pt",
-                padding=True,
-                fps=args.fps,
-                do_sample_frames=args.fps is not None,
-                use_audio_in_video=True,
-            )
-            inputs = move_batch_to_device(inputs, device, floating_dtype=model_dtype)
-            prompt_len = int(inputs["input_ids"].shape[1])
-
-            candidate_metrics: dict[str, dict[str, Any]] = {}
-            for answer_name, answer_ids in answer_id_map.items():
-                appended_inputs = clone_with_appended_answer(inputs, answer_ids)
-                outputs = model(
-                    **appended_inputs,
+                conversation = make_conversation(video_path, args.prompt_text)
+                prompt_text = processor.apply_chat_template(
+                    conversation,
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+                audio_array = extract_audio_from_video(video_path, sample_rate=sampling_rate)
+                inputs = processor(
+                    text=prompt_text,
+                    videos=[[video_path]],
+                    audio=[audio_array],
+                    return_tensors="pt",
+                    padding=True,
+                    fps=args.fps,
+                    do_sample_frames=args.fps is not None,
                     use_audio_in_video=True,
-                    output_router_logits=True,
-                    return_dict=True,
                 )
+                inputs = move_batch_to_device(inputs, device, floating_dtype=model_dtype)
+                prompt_len = int(inputs["input_ids"].shape[1])
 
-                candidate_logprob = compute_candidate_logprob(
-                    logits=outputs.logits,
-                    appended_input_ids=appended_inputs["input_ids"],
-                    prompt_len=prompt_len,
-                    answer_len=int(answer_ids.numel()),
-                )
-                feature_payload = extract_answer_features(
-                    outputs=outputs,
-                    prompt_len=prompt_len,
-                    answer_len=int(answer_ids.numel()),
-                    batch_size=int(appended_inputs["input_ids"].shape[0]),
-                    seq_len=int(appended_inputs["input_ids"].shape[1]),
-                )
-                feature_payload["candidate_logprob"] = np.asarray([candidate_logprob], dtype=np.float32)
-                feature_payload["answer_token_ids"] = answer_ids.detach().cpu().numpy().astype(np.int32)
-                if not args.save_full_router_probs:
-                    feature_payload.pop("router_top1", None)
+                candidate_metrics: dict[str, dict[str, Any]] = {}
+                for answer_name, answer_ids in answer_id_map.items():
+                    appended_inputs = clone_with_appended_answer(inputs, answer_ids)
+                    router_capture.clear()
+                    outputs = model(
+                        **appended_inputs,
+                        use_audio_in_video=True,
+                        return_dict=True,
+                    )
+                    router_logits = router_capture.get_router_logits()
 
-                feature_name = f"{safe_name(clip_id)}__{safe_name(variant)}__{answer_name}.npz"
-                feature_path = feature_dir / feature_name
-                np.savez_compressed(feature_path, **feature_payload)
+                    candidate_logprob = compute_candidate_logprob(
+                        logits=outputs.logits,
+                        appended_input_ids=appended_inputs["input_ids"],
+                        prompt_len=prompt_len,
+                        answer_len=int(answer_ids.numel()),
+                    )
+                    feature_payload = extract_answer_features(
+                        router_logits=router_logits,
+                        prompt_len=prompt_len,
+                        answer_len=int(answer_ids.numel()),
+                        batch_size=int(appended_inputs["input_ids"].shape[0]),
+                        seq_len=int(appended_inputs["input_ids"].shape[1]),
+                    )
+                    feature_payload["candidate_logprob"] = np.asarray([candidate_logprob], dtype=np.float32)
+                    feature_payload["answer_token_ids"] = answer_ids.detach().cpu().numpy().astype(np.int32)
+                    if not args.save_full_router_probs:
+                        feature_payload.pop("router_top1", None)
 
-                candidate_metrics[answer_name] = {
-                    "logprob": candidate_logprob,
-                    "feature_path": str(feature_path.resolve()),
-                    "answer_token_count": int(answer_ids.numel()),
+                    feature_name = f"{safe_name(clip_id)}__{safe_name(variant)}__{answer_name}.npz"
+                    feature_path = feature_dir / feature_name
+                    np.savez_compressed(feature_path, **feature_payload)
+
+                    candidate_metrics[answer_name] = {
+                        "logprob": candidate_logprob,
+                        "feature_path": str(feature_path.resolve()),
+                        "answer_token_count": int(answer_ids.numel()),
+                    }
+
+                yes_logprob = candidate_metrics["yes"]["logprob"]
+                no_logprob = candidate_metrics["no"]["logprob"]
+                margin = yes_logprob - no_logprob
+                prediction = "yes" if margin >= 0 else "no"
+
+                result_row = {
+                    **row,
+                    "prompt_text": args.prompt_text,
+                    "prompt_len": prompt_len,
+                    "yes_logprob": yes_logprob,
+                    "no_logprob": no_logprob,
+                    "yes_minus_no_margin": margin,
+                    "prediction": prediction,
+                    "yes_feature_path": candidate_metrics["yes"]["feature_path"],
+                    "no_feature_path": candidate_metrics["no"]["feature_path"],
+                    "yes_answer_token_count": candidate_metrics["yes"]["answer_token_count"],
+                    "no_answer_token_count": candidate_metrics["no"]["answer_token_count"],
                 }
-
-            yes_logprob = candidate_metrics["yes"]["logprob"]
-            no_logprob = candidate_metrics["no"]["logprob"]
-            margin = yes_logprob - no_logprob
-            prediction = "yes" if margin >= 0 else "no"
-
-            result_row = {
-                **row,
-                "prompt_text": args.prompt_text,
-                "prompt_len": prompt_len,
-                "yes_logprob": yes_logprob,
-                "no_logprob": no_logprob,
-                "yes_minus_no_margin": margin,
-                "prediction": prediction,
-                "yes_feature_path": candidate_metrics["yes"]["feature_path"],
-                "no_feature_path": candidate_metrics["no"]["feature_path"],
-                "yes_answer_token_count": candidate_metrics["yes"]["answer_token_count"],
-                "no_answer_token_count": candidate_metrics["no"]["answer_token_count"],
-            }
-            all_results.append(result_row)
-            print(json.dumps({"clip_id": clip_id, "variant": variant, "prediction": prediction, "margin": margin}))
+                all_results.append(result_row)
+                print(json.dumps({"clip_id": clip_id, "variant": variant, "prediction": prediction, "margin": margin}))
+        finally:
+            router_capture.close()
 
     results_csv = args.output_dir / "results.csv"
     fieldnames = list(all_results[0].keys()) if all_results else []
