@@ -156,7 +156,7 @@ def compute_candidate_logprob(
     prompt_len: int,
     answer_len: int,
 ) -> float:
-    log_probs = torch.log_softmax(logits[0], dim=-1)
+    log_probs = torch.log_softmax(logits[0].float(), dim=-1)
     total = 0.0
     for offset in range(answer_len):
         predict_position = prompt_len - 1 + offset
