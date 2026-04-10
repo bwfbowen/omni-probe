@@ -1,0 +1,8 @@
+accelerate>=1.8.0
+matplotlib>=3.8.0
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+soundfile>=0.12.1
+transformers>=5.5.0
+qwen-vl-utils[decord]>=0.0.11
