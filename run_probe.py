@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +67,35 @@ def choose_dtype(name: str) -> Any:
 def load_manifest(path: Path) -> list[dict[str, str]]:
     with path.open() as f:
         return list(csv.DictReader(f))
+
+
+def extract_audio_from_video(video_path: str, sample_rate: int) -> np.ndarray:
+    import soundfile as sf
+
+    with tempfile.TemporaryDirectory(prefix="qwen3_audio_") as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        wav_path = tmpdir / "audio.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                video_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                str(wav_path),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        audio, _ = sf.read(wav_path, dtype="float32", always_2d=False)
+    if isinstance(audio, np.ndarray) and audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
+    return np.asarray(audio, dtype=np.float32)
 
 
 def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
@@ -216,6 +247,7 @@ def main() -> None:
     }
 
     all_results: list[dict[str, Any]] = []
+    sampling_rate = int(processor.feature_extractor.sampling_rate)
 
     with torch.no_grad():
         for row in rows:
@@ -224,15 +256,20 @@ def main() -> None:
             video_path = row["video_path"]
 
             conversation = make_conversation(video_path, args.prompt_text)
-            inputs = processor.apply_chat_template(
+            prompt_text = processor.apply_chat_template(
                 conversation,
-                load_audio_from_video=True,
                 add_generation_prompt=True,
-                tokenize=True,
-                return_dict=True,
+                tokenize=False,
+            )
+            audio_array = extract_audio_from_video(video_path, sample_rate=sampling_rate)
+            inputs = processor(
+                text=prompt_text,
+                videos=[[video_path]],
+                audio=[audio_array],
                 return_tensors="pt",
-                fps=args.fps,
                 padding=True,
+                fps=args.fps,
+                do_sample_frames=args.fps is not None,
                 use_audio_in_video=True,
             )
             inputs = move_batch_to_device(inputs, device)
