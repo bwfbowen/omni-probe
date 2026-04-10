@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -36,12 +37,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--nuisance",
-        choices=["gain", "noise"],
-        default="gain",
+        choices=["gain", "noise", "none"],
+        default="none",
         help="Nuisance perturbation that should preserve alignment.",
+    )
+    parser.add_argument(
+        "--mismatch",
+        choices=["swap", "permute"],
+        nargs="*",
+        default=["swap", "permute"],
+        help="Extra strong mismatch variants to create for each clip.",
     )
     parser.add_argument("--gain_db", type=float, default=3.0, help="Gain change used when nuisance=gain.")
     parser.add_argument("--noise_snr_db", type=float, default=28.0, help="SNR used when nuisance=noise.")
+    parser.add_argument(
+        "--permute_chunk_ms",
+        type=float,
+        default=1000.0,
+        help="Chunk size in milliseconds used when mismatch includes permute.",
+    )
     parser.add_argument("--sample_rate", type=int, default=16000, help="Temporary wav extraction sample rate.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for noise nuisance.")
     return parser.parse_args()
@@ -110,6 +124,39 @@ def apply_noise(audio: np.ndarray, snr_db: float, seed: int) -> np.ndarray:
     return np.clip(audio + noise, -1.0, 1.0)
 
 
+def match_audio_length(audio: np.ndarray, target_len: int) -> np.ndarray:
+    if target_len <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    if audio.shape[0] == target_len:
+        return np.array(audio, copy=True)
+    if audio.shape[0] > target_len:
+        return np.array(audio[:target_len], copy=True)
+
+    repeats = int(math.ceil(target_len / max(audio.shape[0], 1)))
+    tiled = np.tile(audio, repeats)
+    return np.array(tiled[:target_len], copy=True)
+
+
+def permute_audio_chunks(audio: np.ndarray, chunk_samples: int, seed: int) -> np.ndarray:
+    if chunk_samples <= 0 or audio.shape[0] <= 1:
+        return np.array(audio, copy=True)
+
+    chunks = [audio[start : start + chunk_samples] for start in range(0, audio.shape[0], chunk_samples)]
+    if len(chunks) < 2:
+        return np.array(audio, copy=True)
+
+    rng = np.random.default_rng(seed)
+    order = np.arange(len(chunks))
+    for _ in range(8):
+        rng.shuffle(order)
+        if not np.array_equal(order, np.arange(len(chunks))):
+            break
+    else:
+        order = np.roll(order, 1)
+
+    return np.concatenate([chunks[index] for index in order], axis=0)[: audio.shape[0]].astype(np.float32, copy=False)
+
+
 def iter_videos(input_dir: Path) -> list[Path]:
     return sorted(path for path in input_dir.iterdir() if path.suffix.lower() in VIDEO_SUFFIXES)
 
@@ -131,31 +178,39 @@ def main() -> None:
         raise FileNotFoundError(f"No video files found in {args.input_dir}")
 
     rows: list[dict[str, str | int | float]] = []
+    mismatch_set = set(args.mismatch)
 
-    for clip_index, src_video in enumerate(videos):
-        clip_id = src_video.stem
-        clip_dir = args.output_dir / clip_id
-        clip_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="prepare_variants_") as tmpdir_str:
+        tmpdir = Path(tmpdir_str)
+        import soundfile as sf
 
-        rows.append(
-            {
-                "clip_id": clip_id,
-                "variant": "aligned",
-                "video_path": str(src_video.resolve()),
-                "source_video_path": str(src_video.resolve()),
-                "alignment_label": 1,
-                "perturbation": "none",
-                "shift_ms": 0,
-            }
-        )
-
-        with tempfile.TemporaryDirectory(prefix=f"{clip_id}_") as tmpdir_str:
-            tmpdir = Path(tmpdir_str)
-            wav_path = tmpdir / f"{clip_id}.wav"
+        audio_cache: dict[str, tuple[np.ndarray, int]] = {}
+        for src_video in videos:
+            wav_path = tmpdir / f"{src_video.stem}.wav"
             extract_audio(src_video, wav_path, args.sample_rate)
             audio, sample_rate = sf.read(wav_path, dtype="float32", always_2d=False)
             if audio.ndim > 1:
                 audio = np.mean(audio, axis=1)
+            audio_cache[src_video.stem] = (np.asarray(audio, dtype=np.float32), int(sample_rate))
+
+        for clip_index, src_video in enumerate(videos):
+            clip_id = src_video.stem
+            clip_dir = args.output_dir / clip_id
+            clip_dir.mkdir(parents=True, exist_ok=True)
+            audio, sample_rate = audio_cache[clip_id]
+
+            rows.append(
+                {
+                    "clip_id": clip_id,
+                    "variant": "aligned",
+                    "video_path": str(src_video.resolve()),
+                    "source_video_path": str(src_video.resolve()),
+                    "audio_source_clip_id": clip_id,
+                    "alignment_label": 1,
+                    "perturbation": "none",
+                    "shift_ms": 0,
+                }
+            )
 
             for shift_ms in args.shift_ms:
                 shift_samples = int(round(sample_rate * (shift_ms / 1000.0)))
@@ -170,40 +225,90 @@ def main() -> None:
                         "variant": f"shift_{shift_ms}ms",
                         "video_path": str(shifted_video.resolve()),
                         "source_video_path": str(src_video.resolve()),
+                        "audio_source_clip_id": clip_id,
                         "alignment_label": 0,
                         "perturbation": "shift",
                         "shift_ms": shift_ms,
                     }
                 )
 
+            if "swap" in mismatch_set and len(videos) > 1:
+                donor_video = videos[(clip_index + 1) % len(videos)]
+                donor_clip_id = donor_video.stem
+                donor_audio, _ = audio_cache[donor_clip_id]
+                swapped_audio = match_audio_length(donor_audio, audio.shape[0])
+                swapped_wav = tmpdir / f"{clip_id}_swap_from_{donor_clip_id}.wav"
+                swapped_video = clip_dir / f"{clip_id}_swap_from_{donor_clip_id}.mp4"
+                sf.write(swapped_wav, swapped_audio, sample_rate)
+                remux_video_with_audio(src_video, swapped_wav, swapped_video)
+                rows.append(
+                    {
+                        "clip_id": clip_id,
+                        "variant": f"swap_from_{donor_clip_id}",
+                        "video_path": str(swapped_video.resolve()),
+                        "source_video_path": str(src_video.resolve()),
+                        "audio_source_clip_id": donor_clip_id,
+                        "alignment_label": 0,
+                        "perturbation": "swap",
+                        "shift_ms": 0,
+                    }
+                )
+
+            if "permute" in mismatch_set:
+                chunk_samples = int(round(sample_rate * (args.permute_chunk_ms / 1000.0)))
+                permuted_audio = permute_audio_chunks(audio, chunk_samples=chunk_samples, seed=args.seed + clip_index)
+                permute_name = f"permute_{int(args.permute_chunk_ms)}ms"
+                permuted_wav = tmpdir / f"{clip_id}_{permute_name}.wav"
+                permuted_video = clip_dir / f"{clip_id}_{permute_name}.mp4"
+                sf.write(permuted_wav, permuted_audio, sample_rate)
+                remux_video_with_audio(src_video, permuted_wav, permuted_video)
+                rows.append(
+                    {
+                        "clip_id": clip_id,
+                        "variant": permute_name,
+                        "video_path": str(permuted_video.resolve()),
+                        "source_video_path": str(src_video.resolve()),
+                        "audio_source_clip_id": clip_id,
+                        "alignment_label": 0,
+                        "perturbation": "permute",
+                        "shift_ms": 0,
+                    }
+                )
+
             if args.nuisance == "gain":
                 nuisance_audio = apply_gain(audio, args.gain_db)
                 nuisance_name = f"gain_{args.gain_db:+.1f}dB".replace(".", "p")
-            else:
+            elif args.nuisance == "noise":
                 nuisance_audio = apply_noise(audio, args.noise_snr_db, seed=args.seed + clip_index)
                 nuisance_name = f"noise_snr_{args.noise_snr_db:.1f}dB".replace(".", "p")
+            else:
+                nuisance_audio = None
+                nuisance_name = ""
 
-            nuisance_wav = tmpdir / f"{clip_id}_{nuisance_name}.wav"
-            nuisance_video = clip_dir / f"{clip_id}_{nuisance_name}.mp4"
-            sf.write(nuisance_wav, nuisance_audio, sample_rate)
-            remux_video_with_audio(src_video, nuisance_wav, nuisance_video)
-            rows.append(
-                {
-                    "clip_id": clip_id,
-                    "variant": nuisance_name,
-                    "video_path": str(nuisance_video.resolve()),
-                    "source_video_path": str(src_video.resolve()),
-                    "alignment_label": 1,
-                    "perturbation": args.nuisance,
-                    "shift_ms": 0,
-                }
-            )
+            if nuisance_audio is not None:
+                nuisance_wav = tmpdir / f"{clip_id}_{nuisance_name}.wav"
+                nuisance_video = clip_dir / f"{clip_id}_{nuisance_name}.mp4"
+                sf.write(nuisance_wav, nuisance_audio, sample_rate)
+                remux_video_with_audio(src_video, nuisance_wav, nuisance_video)
+                rows.append(
+                    {
+                        "clip_id": clip_id,
+                        "variant": nuisance_name,
+                        "video_path": str(nuisance_video.resolve()),
+                        "source_video_path": str(src_video.resolve()),
+                        "audio_source_clip_id": clip_id,
+                        "alignment_label": 1,
+                        "perturbation": args.nuisance,
+                        "shift_ms": 0,
+                    }
+                )
 
     fieldnames = [
         "clip_id",
         "variant",
         "video_path",
         "source_video_path",
+        "audio_source_clip_id",
         "alignment_label",
         "perturbation",
         "shift_ms",

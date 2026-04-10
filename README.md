@@ -23,7 +23,9 @@ For each source video, we construct:
 
 - `aligned`: original clip
 - `shift_XXXms`: circularly shifted audio remuxed back into the original video
-- `gain_+XdB` or `noise_snr_XXdB`: nuisance perturbation that keeps alignment intact
+- `swap_from_<other_clip>`: cross-clip audio swap, a strong mismatch condition
+- `permute_XXXXms`: within-clip chunk-shuffled audio, a strong mismatch condition
+- optional `gain_+XdB` or `noise_snr_XXdB`: nuisance perturbation that keeps alignment intact
 
 We then prompt the frozen thinker with a binary verification task and teacher-force candidate answers:
 
@@ -116,9 +118,10 @@ The `Social-IQ-Video` mirror is a copy of the Social-IQ 2.0 challenge data. The 
 
 ```bash
 python prepare_variants.py \
-  --shift_ms 800 \
-  --nuisance gain \
-  --gain_db 3.0
+  --shift_ms 1600 2400 \
+  --mismatch swap permute \
+  --permute_chunk_ms 1000 \
+  --nuisance none
 ```
 
 This writes:
@@ -149,8 +152,9 @@ If the goal is "finish in about 4 hours and get a real signal", do not start bro
 Use:
 
 - 6 to 12 short clips
-- 1 shift value: `800 ms`
-- 1 nuisance type: `gain`
+- 1 or 2 large shift values: `1600 ms`, optionally `2400 ms`
+- strong mismatches: `swap`, `permute`
+- nuisance: `none` at first, unless you explicitly want a control
 - default prompt from `experiment_config.py`
 - one run only
 
