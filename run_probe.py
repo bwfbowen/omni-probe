@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +10,29 @@ import numpy as np
 import torch
 from transformers import AutoProcessor, Qwen3OmniMoeThinkerForConditionalGeneration
 
-from experiment_config import DEFAULT_ANSWER_TEXT, DEFAULT_PROMPT, make_conversation
+from experiment_config import (
+    DEFAULT_ANSWER_TEXT,
+    DEFAULT_PROMPT,
+    DEFAULT_RESULTS_DIR,
+    DEFAULT_VARIANTS_DIR,
+    make_conversation,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Qwen3 AV router probe.")
-    parser.add_argument("--manifest_csv", type=Path, required=True)
-    parser.add_argument("--output_dir", type=Path, required=True)
+    parser.add_argument(
+        "--manifest_csv",
+        type=Path,
+        default=DEFAULT_VARIANTS_DIR / "manifest.csv",
+        help="Variant manifest CSV. Defaults to the Social-IQ-Video manifest path.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=DEFAULT_RESULTS_DIR,
+        help="Output directory for feature files and results CSV.",
+    )
     parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-Omni-30B-A3B-Instruct")
     parser.add_argument("--fps", type=float, default=1.0)
     parser.add_argument("--min_pixels", type=int, default=None)
@@ -156,6 +171,11 @@ def extract_answer_features(
 
 def main() -> None:
     args = parse_args()
+    if not args.manifest_csv.exists():
+        raise FileNotFoundError(
+            f"Manifest file {args.manifest_csv} does not exist. "
+            "Run prepare_variants.py first or pass --manifest_csv explicitly."
+        )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     feature_dir = args.output_dir / "features"
     feature_dir.mkdir(parents=True, exist_ok=True)

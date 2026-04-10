@@ -5,11 +5,23 @@ from pathlib import Path
 
 import numpy as np
 
+from experiment_config import DEFAULT_ANALYSIS_DIR, DEFAULT_RESULTS_CSV
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze router-probe outputs.")
-    parser.add_argument("--results_csv", type=Path, required=True)
-    parser.add_argument("--output_dir", type=Path, required=True)
+    parser.add_argument(
+        "--results_csv",
+        type=Path,
+        default=DEFAULT_RESULTS_CSV,
+        help="Probe results CSV. Defaults to the Social-IQ-Video run output path.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=DEFAULT_ANALYSIS_DIR,
+        help="Directory for analysis summaries and plots.",
+    )
     parser.add_argument("--layer_start", type=int, default=None)
     parser.add_argument("--layer_end", type=int, default=None, help="Exclusive upper bound.")
     return parser.parse_args()
@@ -39,6 +51,11 @@ def select_layers(array: np.ndarray, layer_start: int | None, layer_end: int | N
 
 def main() -> None:
     args = parse_args()
+    if not args.results_csv.exists():
+        raise FileNotFoundError(
+            f"Results CSV {args.results_csv} does not exist. "
+            "Run run_probe.py first or pass --results_csv explicitly."
+        )
 
     import matplotlib.pyplot as plt
     import pandas as pd

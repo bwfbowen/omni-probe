@@ -1,4 +1,6 @@
 accelerate>=1.8.0
+hf-xet>=1.1.5
+huggingface_hub>=0.34.0
 matplotlib>=3.8.0
 numpy>=1.26.0
 pandas>=2.2.0

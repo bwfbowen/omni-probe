@@ -8,14 +8,25 @@ from pathlib import Path
 
 import numpy as np
 
+from experiment_config import DEFAULT_RAW_CLIPS_DIR, DEFAULT_VARIANTS_DIR
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Prepare shifted and nuisance AV variants.")
-    parser.add_argument("--input_dir", type=Path, required=True, help="Directory containing source video clips.")
-    parser.add_argument("--output_dir", type=Path, required=True, help="Directory for generated variants.")
+    parser.add_argument(
+        "--input_dir",
+        type=Path,
+        default=DEFAULT_RAW_CLIPS_DIR,
+        help="Directory containing source video clips. Defaults to the Social-IQ-Video raw clip folder.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=DEFAULT_VARIANTS_DIR,
+        help="Directory for generated variants. Defaults to the Social-IQ-Video variant folder.",
+    )
     parser.add_argument(
         "--shift_ms",
         type=int,
@@ -110,6 +121,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_path = args.output_dir / "manifest.csv"
+    if not args.input_dir.exists():
+        raise FileNotFoundError(
+            f"Input directory {args.input_dir} does not exist. "
+            "Run download_social_iq_video.py first or pass --input_dir explicitly."
+        )
     videos = iter_videos(args.input_dir)
     if not videos:
         raise FileNotFoundError(f"No video files found in {args.input_dir}")
