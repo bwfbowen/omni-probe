@@ -98,11 +98,18 @@ def extract_audio_from_video(video_path: str, sample_rate: int) -> np.ndarray:
     return np.asarray(audio, dtype=np.float32)
 
 
-def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+def move_batch_to_device(
+    batch: dict[str, Any],
+    device: torch.device,
+    floating_dtype: torch.dtype | None = None,
+) -> dict[str, Any]:
     moved = {}
     for key, value in batch.items():
         if torch.is_tensor(value):
-            moved[key] = value.to(device)
+            if floating_dtype is not None and torch.is_floating_point(value):
+                moved[key] = value.to(device=device, dtype=floating_dtype)
+            else:
+                moved[key] = value.to(device)
         else:
             moved[key] = value
     return moved
@@ -239,6 +246,7 @@ def main() -> None:
     )
     model.eval()
     device = next(model.parameters()).device
+    model_dtype = next(model.parameters()).dtype
 
     tokenizer = processor.tokenizer
     answer_id_map = {
@@ -272,7 +280,7 @@ def main() -> None:
                 do_sample_frames=args.fps is not None,
                 use_audio_in_video=True,
             )
-            inputs = move_batch_to_device(inputs, device)
+            inputs = move_batch_to_device(inputs, device, floating_dtype=model_dtype)
             prompt_len = int(inputs["input_ids"].shape[1])
 
             candidate_metrics: dict[str, dict[str, Any]] = {}
